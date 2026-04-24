@@ -84,6 +84,48 @@ Endpoints:
 | POST | `/send` | send_text — returns `{status: delivered / submitted_unconfirmed / status_unknown / failed, diagnostic, ...}` |
 | GET  | `/messages/stream` | new_messages_since polled into SSE |
 
+### SSE payload shape (v1.10.27 — Wechaty-aligned)
+
+`/messages/stream` emits `event: messages` carrying a JSON array of:
+
+```ts
+{
+  messageId: string,
+  chatId: string,                // wxid (DM) or groupid@chatroom
+  senderId: string,              // in group: sender's wxid; in DM: the other party's wxid
+  senderName: string,
+  chatName: string,
+  isGroup: boolean,
+  body: string,                  // human-readable text. For URL / quote / mini_program, body is the title — raw XML is NOT exposed here.
+  hasMedia: boolean,
+  mediaType: "image"|"voice"|"video"|"file"|"",
+  mediaUrls: string[],           // first entry is CDN URL when applicable
+  mentionedIds: string[],        // v1.10.25+ — authoritative @-mention list from WeChat msgsource <atuserlist>
+  quotedParticipant: string,     // v1.10.27+ — populated from refer.fromUser on quote replies
+  botIds: string[],              // legacy heuristic self-marker; NEW consumers should rely on fromSelf instead
+  fromSelf: boolean,             // v1.10.25+ — bridge-authoritative "this row was produced by our own POST /send"; DROP THESE to avoid self-echo loops
+  messageKind: "text"|"image"|"audio"|"video"|"contact"|"emoticon"|"location"|
+               "url"|"attachment"|"mini_program"|"chat_history"|"transfer"|
+               "red_envelope"|"recalled"|"system"|"unknown",  // v1.10.27+, aligned to Wechaty's MessageType enum
+  urlLink?:     { title, description, url, thumbUrl },                             // present iff messageKind=url
+  miniProgram?: { title, description, appId, username, pagePath, thumbUrl },        // present iff messageKind=mini_program
+  refer?:       { svrId, fromUser, chatUser, displayName, content },              // present on quote replies
+  recall?:      { replacedMsgId, text },                                            // present iff messageKind=recalled
+  media?:       { aesKey, md5, cdnUrl, cdnThumbUrl, length, durationSeconds, localPath },  // structured metadata for image/audio/video/attachment
+  timestamp: number,
+}
+```
+
+The full JSON Schema is committed at [`wx/schema/sse-payload-v1.10.27.schema.json`](https://github.com/leeguooooo/wechat-skill/blob/main/wx/schema/sse-payload-v1.10.27.schema.json) and enforced by a contract test in the daemon build.
+
+**Consumer checklist:**
+
+- Filter self-echo with `fromSelf === true`. Do NOT use `senderId === myWxid` — in DM both directions share the same senderId.
+- In groups, only respond when `isGroup && mentionedIds.includes(myWxid)` (or your bot's nickname shows up in body as `@name `).
+- Need the URL only? `mediaUrls[0]`. Need aesKey + md5 to decrypt or verify? `media.cdnUrl / media.aesKey / …`.
+- Expect `body` for URL / quote / mini_program to be the human title. If you were previously parsing raw `<appmsg>` XML from body, migrate to the dedicated `urlLink` / `miniProgram` / `refer` objects.
+- Backward compatible: every pre-v1.10.25 field is preserved in name + type. New fields are additive.
+
 **Security notes for agents:**
 - Bridge binds 127.0.0.1 — not exposed to LAN without tunnelling.
 - Set `WECHAT_BRIDGE_BEARER=<secret>` env var to require `Authorization: Bearer <secret>` on non-`/health` routes. Use this if tunnelling via Tailscale / SSH.

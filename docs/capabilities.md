@@ -20,6 +20,15 @@
 | send 失败自动诊断块 | ✅ v1.9.16 | `wechat send` | 失败时打印可复制诊断块，一行贴回就能定位问题 |
 | history / search 跨分片 DB 合并 | ✅ v1.9.19 | `wechat history`、`search` | 多个 MSG_*.db shard 自动合并 + create_time 排序 |
 | **本地 HTTP bridge（agent 集成）** | ✅ v1.10.0 | `wechat-bridge` | 127.0.0.1:18400；8 路 HTTP + SSE；可选 `WECHAT_BRIDGE_BEARER` |
+| 权威 @-mention 列表（群） | ✅ v1.10.25 | SSE `mentionedIds` | 从 WeChat msgsource `<atuserlist>` 解；之前是空数组 |
+| Self-echo 防护 | ✅ v1.10.25 | SSE `fromSelf:bool` | bridge 记录自己 /send 过的行；客户 `fromSelf===true` 直接 drop，避免 agent 回自己 |
+| 消息类型分类（Wechaty 对齐） | ✅ v1.10.26 | SSE `messageKind` | 16 enum 值，text/image/audio/video/url/mini_program/recalled/… |
+| 结构化 URL 卡片 | ✅ v1.10.27 | SSE `urlLink` | `{title, description, url, thumbUrl}` |
+| 结构化小程序 | ✅ v1.10.27 | SSE `miniProgram` | `{title, description, appId, username, pagePath, thumbUrl}` |
+| 结构化引用回复 | ✅ v1.10.27 | SSE `refer` | `{svrId, fromUser, chatUser, displayName, content}` |
+| 结构化撤回 | ✅ v1.10.27 | SSE `recall` | `{replacedMsgId, text}` |
+| 结构化媒体元数据 | ✅ v1.10.27 | SSE `media` | `{aesKey, md5, cdnUrl, cdnThumbUrl, length, durationSeconds, localPath}` |
+| SSE payload JSON schema 契约 | ✅ v1.10.26/27 | `wx/schema/sse-payload-v1.10.27.schema.json` | draft-07，additionalProperties:false，daemon 构建期跑契约单测 |
 | 列最近会话 | ✅ v1.1 | `wechat sessions` | |
 | 联系人列表 / 搜索 | ✅ v1.1 | `wechat contacts [--query]` | 昵称 / 备注 / wxid 模糊 |
 | 查聊天记录 | ✅ v1.1 | `wechat history <chat> [-n] [--since/--until]` | |

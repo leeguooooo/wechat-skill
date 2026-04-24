@@ -1,5 +1,39 @@
 # 更新日志
 
+## v1.10.27 — 2026-04-25
+
+SSE payload 对齐 Wechaty `MessageType` 枚举。bridge 给非 CLI-based agent 平台（Hermes / n8n / Dify / LangChain）一个可直接消费的富消息流。
+
+- **新 `messageKind` 字段**：16 个 Wechaty enum 值（`text` / `image` / `audio` / `video` / `url` / `mini_program` / `recalled` / `transfer` / `red_envelope` / `system` / …）。以前 consumer 要自己从 `mediaType` 字符串 + 原始 XML 猜消息类型，现在 daemon 分类好直接给
+- **5 个结构化嵌套对象**（按 `messageKind` 出现）：
+  - `urlLink` — `{title, description, url, thumbUrl}` (type=5 appmsg)
+  - `miniProgram` — `{title, description, appId, username, pagePath, thumbUrl}` (type=33/36 appmsg)
+  - `refer` — `{svrId, fromUser, chatUser, displayName, content}`（引用回复，type=57 appmsg）
+  - `recall` — `{replacedMsgId, text}`（撤回 sysmsg）
+  - `media` — `{aesKey, md5, cdnUrl, cdnThumbUrl, length, durationSeconds, localPath}`（image/voice/video/file 的 CDN + 校验信息）
+- `body` 对 url / quote / mini_program 类消息改成 title（人读文本），原来是原始 `<appmsg>` XML
+- 新 schema 固化在 `wx/schema/sse-payload-v1.10.27.schema.json` + 契约单测防字段 drift
+- MiniProgram 消息的 body bug 修（以前泄漏原始 XML）
+- 向后兼容：所有 v1.10.25 以来字段保留不变，仅新增
+
+## v1.10.25–26 — 2026-04-24/25
+
+**两个大 bug 根治**，影响所有 v1.10.24 之前的用户：
+
+- **`wechat send --wxid X` 被路由到 UI 聚焦的聊天**（`send` 能返回 `sent:true` 但实际发错人）
+  - 根因：WeChat 4.x `widget+0x2B8` 是 libc++ `std::string`，有 SSO（内联）+ long（堆指针）双形态；之前的 hijack 只覆盖一种
+  - v1.10.23/24：双形态都支持
+  - v1.10.22 作 belt-and-suspenders：`send` 完事后根据消息落表的 `Msg_md5(wxid)` 校验是否路由正确，错误就 `reason: delivery_misrouted`
+- **DM self-echo loop**：bot 发出去的 DM 在 SSE 里又作 inbound 传回，导致 agent 回自己的消息无限循环
+  - v1.10.25：`HermesMessage` 新增 `fromSelf: bool`。bridge 记录每次 `/send` 刚产生的行，SSE emit 时 mark；客户看 `fromSelf === true` 直接 drop
+- **群里 @ bot 永远不触发响应**：bridge 之前 `mentionedIds` 硬编码空数组
+  - v1.10.25：daemon 读 `Msg_xxx.source` BLOB（zstd 压缩的 msgsource XML），解 `<atuserlist>` 塞到 SSE payload
+
+另外：
+
+- v1.10.26：消息类型分类器（image/voice/video/url/quote/miniprogram/recall），填 `hasMedia` / `mediaType` / `mediaUrls` / `quotedParticipant`
+- `wechat-inspect-msg` RE 工具：dump 单行全列 JSON，方便以后 WeChat 升级 schema 时快速抓新字段
+
 ## v1.10.0 — 2026-04-23
 
 **面向 agent / bot 平台的大版本**：新出独立二进制 `wechat-bridge`，把 wechatd 的 RPC 包成稳定的本地 HTTP + SSE，Hermes / n8n / Dify / LangChain 可以像接 WhatsApp bridge 一样接 WeChat。
