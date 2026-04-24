@@ -122,6 +122,44 @@ for BIN_NAME in "${BINS[@]}"; do
     sudo xattr -d com.apple.quarantine "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null || true
   fi
 
+  # Ad-hoc codesign with a stable identifier. Without this, every
+  # upgrade gets a new content hash → TCC (Accessibility /
+  # Input Monitoring) sees it as a NEW binary → user has to re-grant.
+  # With a stable --identifier, some macOS builds will recognize the
+  # new binary as a continuation of the previous grant and skip the
+  # re-auth prompt. Not guaranteed (Sonoma+ is strict), but measurably
+  # better than nothing. Cost: ~50ms. Only matters for wechat-bridge
+  # and wechatd (CGEventPostToPid callers); `wechat` CLI doesn't need
+  # it but we sign all three for consistency + future-proofing.
+  #
+  # Don't suppress stderr — if codesign fails for any reason (no
+  # `codesign` binary, broken entitlements, etc.), the user needs to
+  # see it rather than hear that install "succeeded".
+  IDENTIFIER="ai.wechatskill.${BIN_NAME}"
+  CODESIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/wechat-install-codesign.XXXXXX")
+  if [[ -w "${INSTALL_DIR}/${BIN_NAME}" ]]; then
+    codesign --force --sign - --identifier "${IDENTIFIER}" \
+      "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
+    CS_RC=$?
+  else
+    sudo codesign --force --sign - --identifier "${IDENTIFIER}" \
+      "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
+    CS_RC=$?
+  fi
+  if [[ ${CS_RC} -ne 0 ]]; then
+    warn "codesign 对 ${BIN_NAME} 失败（rc=${CS_RC}）："
+    sed 's/^/    /' "${CODESIGN_ERR}" >&2
+    warn "  binary 已安装但未签名；Accessibility TCC 可能每次升级都要重新勾"
+  else
+    # Verify signature was actually applied — helps catch "silent"
+    # codesign no-ops where exit 0 but sig wasn't written.
+    if ! codesign --verify "${INSTALL_DIR}/${BIN_NAME}" 2>>"${CODESIGN_ERR}"; then
+      warn "codesign --verify ${BIN_NAME} 不通过 —— 签名可能没真正落到 binary 上"
+      sed 's/^/    /' "${CODESIGN_ERR}" >&2
+    fi
+  fi
+  rm -f "${CODESIGN_ERR}"
+
   success "已安装：${INSTALL_DIR}/${BIN_NAME}"
 done
 echo ""
@@ -134,6 +172,42 @@ if pgrep -x wechatd >/dev/null 2>&1; then
   info "检测到旧 wechatd 还在跑，停掉好让新二进制下一次自动拉起"
   "${INSTALL_DIR}/wechat" daemon stop >/dev/null 2>&1 || true
   pkill -x wechatd 2>/dev/null || true
+fi
+
+# Kickstart bridge LaunchAgent if present, so it re-spawns with the new
+# binary. New binary has our v1.10.30+ startup AX preflight — if TCC is
+# stale after upgrade (the classic "每次升级都要重新授权" problem),
+# bridge will refuse to start and print a remediation pointer.
+if launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
+  info "重启 LaunchAgent ai.wechat.bridge 加载新 binary"
+  launchctl kickstart -k "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
+fi
+
+# Post-install TCC sanity check. wechat-bridge 1.10.30+ supports
+# --check-trust probe mode: exits 0 if Accessibility granted, 1 if not.
+# If not, we don't fail install (user may intend to fix later), but
+# we print the precise next step. This catches the "升完级发消息炸，
+# 用户不知道要重新勾 Accessibility" class of failure that v1.10.29 and
+# earlier shipped into.
+#
+# Retry a few times with short backoff: right after `codesign --force`
+# and `launchctl kickstart`, macOS TCC cache can briefly report stale
+# state. A false-negative warning right on install would spook the
+# customer unnecessarily.
+TCC_OK=0
+for attempt in 1 2 3; do
+  if "${INSTALL_DIR}/wechat-bridge" --check-trust >/dev/null 2>&1; then
+    TCC_OK=1
+    break
+  fi
+  sleep 1
+done
+if [[ ${TCC_OK} -eq 1 ]]; then
+  success "Accessibility TCC: 已授权 ✓"
+else
+  warn "Accessibility TCC: 未授权（升级后 macOS 常常要求重新勾）"
+  printf '    %s→ 跑一次：%s%s\n' "${C_DIM}" "${INSTALL_DIR}/wechat doctor --fix-tcc" "${C_RESET}"
+  printf '    %s（30 秒交互流程：自动开系统设置 + Finder 选中 bridge，拖过去 + 回车）%s\n' "${C_DIM}" "${C_RESET}"
 fi
 echo ""
 
