@@ -143,6 +143,18 @@ wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape
 
 8 个稳定路由：`/health` / `/send` / `/chats` / `/unread` / `/contacts` / `/chat/:wxid` / `/chat/:wxid/history` / `/resolve` / `/messages/stream`（SSE）。**激活码订阅不绕** —— 每次 `/send` 仍然走 daemon 的 AEAD + 服务端 `expires_at` 校验。
 
+#### SSE payload（v1.10.27 对齐 Wechaty）
+
+`/messages/stream` 每条 `event: messages` 是一组对象，字段固定在 [`wx/schema/sse-payload-v1.10.27.schema.json`](https://github.com/leeguooooo/wechat-skill/blob/main/wx/schema/sse-payload-v1.10.27.schema.json)（JSON Schema draft-07，`additionalProperties:false`）。关键字段：
+
+- `messageKind`：Wechaty `MessageType` 枚举小写，如 `text` / `image` / `audio` / `video` / `url` / `mini_program` / `recalled` / `system` 共 16 值
+- `mentionedIds`：群里权威 @-wxid 列表（v1.10.25 起来自 msgsource XML `<atuserlist>`）；**之前一直是空数组**
+- `fromSelf`：bridge 刚 POST /send 过的行会是 true；**用来过 self-echo 最可靠**，比 `senderId === myWxid` 靠谱
+- `urlLink` / `miniProgram` / `refer` / `recall` / `media`：按 `messageKind` 出现的结构化嵌套对象（title / url / appId / aesKey / cdnUrl / duration / …）
+- `hasMedia` + `mediaUrls`：legacy 扁平接口，仍保留
+
+向后兼容：v1.10.25 以来所有已发字段全部保留不变，仅新增。客户旧代码不改能直接跑。
+
 详细 schema 见 [SKILL.md](./SKILL.md#http-bridge-for-agent-integration-v110) + [docs/capabilities.md](./docs/capabilities.md#接-agent-平台hermes--n8n--dify--langchain)。
 
 ---
