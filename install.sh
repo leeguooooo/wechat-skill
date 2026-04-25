@@ -174,12 +174,28 @@ if pgrep -x wechatd >/dev/null 2>&1; then
   pkill -x wechatd 2>/dev/null || true
 fi
 
-# Kickstart bridge LaunchAgent if present, so it re-spawns with the new
-# binary. New binary has our v1.10.30+ startup AX preflight — if TCC is
-# stale after upgrade (the classic "每次升级都要重新授权" problem),
-# bridge will refuse to start and print a remediation pointer.
-if launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
-  info "重启 LaunchAgent ai.wechat.bridge 加载新 binary"
+# Reload bridge LaunchAgent so it (a) picks up the new binary and (b)
+# re-reads the plist environment block.
+#
+# Why not `launchctl kickstart -k`: kickstart re-execs the process but
+# does NOT re-parse the plist's EnvironmentVariables — env only refreshes
+# on a fresh `bootstrap` after `bootout`. v1.10.30 customers hit exactly
+# this: they edited the plist, ran kickstart, plist showed correct env,
+# but the actual running process inherited the OLD env and the new
+# `WECHAT_BRIDGE_GROUP_MENTION_ONLY` flag never made it.
+#
+# bootout + bootstrap is idempotent + ~2s overhead. Cheaper than the
+# half-hour of confused debugging it saves.
+LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/ai.wechat.bridge.plist"
+if [[ -f "${LAUNCHAGENT_PLIST}" ]]; then
+  info "重新加载 LaunchAgent ai.wechat.bridge（bootout + bootstrap，刷新 env）"
+  launchctl bootout "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
+  sleep 1
+  launchctl bootstrap "gui/$(id -u)" "${LAUNCHAGENT_PLIST}" 2>/dev/null || true
+elif launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
+  # LaunchAgent registered but plist file missing — degraded state.
+  # Fall back to kickstart so at least the new binary loads.
+  info "LaunchAgent 注册但 plist 不在标准路径，用 kickstart 重启"
   launchctl kickstart -k "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
 fi
 
