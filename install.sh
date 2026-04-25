@@ -201,11 +201,6 @@ fi
 
 # Post-install TCC sanity check. wechat-bridge 1.10.30+ supports
 # --check-trust probe mode: exits 0 if Accessibility granted, 1 if not.
-# If not, we don't fail install (user may intend to fix later), but
-# we print the precise next step. This catches the "升完级发消息炸，
-# 用户不知道要重新勾 Accessibility" class of failure that v1.10.29 and
-# earlier shipped into.
-#
 # Retry a few times with short backoff: right after `codesign --force`
 # and `launchctl kickstart`, macOS TCC cache can briefly report stale
 # state. A false-negative warning right on install would spook the
@@ -220,12 +215,44 @@ for attempt in 1 2 3; do
 done
 if [[ ${TCC_OK} -eq 1 ]]; then
   success "Accessibility TCC: 已授权 ✓"
+  echo ""
 else
-  warn "Accessibility TCC: 未授权（升级后 macOS 常常要求重新勾）"
-  printf '    %s→ 跑一次：%s%s\n' "${C_DIM}" "${INSTALL_DIR}/wechat doctor --fix-tcc" "${C_RESET}"
-  printf '    %s（30 秒交互流程：自动开系统设置 + Finder 选中 bridge，拖过去 + 回车）%s\n' "${C_DIM}" "${C_RESET}"
+  # TCC missing — auto-trigger the GUI windows so user can't miss the step.
+  # Many customers skim past a single yellow warn line and end up with a
+  # silently broken send path. Open the Accessibility pane + a Finder
+  # window selecting wechat-bridge, RIGHT NOW, before they close the
+  # terminal. Then print a big red banner with the exact 3 actions.
+  echo ""
+  echo ""
+  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+  printf '%s🛑 STOP — Accessibility 授权没勾，bridge 无法发消息！%s\n' "${C_RED}" "${C_RESET}"
+  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+  echo ""
+  echo "macOS Sonoma+ 要求 wechat-bridge 在「辅助功能」清单里。没勾的话："
+  echo "  • wechat send 看似成功但消息其实没发出"
+  echo "  • bridge 启动直接 exit 1，hermes / agent 平台拿不到数据"
+  echo ""
+  echo "我现在帮你打开两个窗口（30 秒动作）："
+  echo "  1. System Settings → 隐私与安全 → 辅助功能（要勾的清单）"
+  echo "  2. Finder 高亮选中 wechat-bridge（你拖到清单里的源文件）"
+  echo ""
+  # Best-effort GUI open — these are fire-and-forget; failures don't
+  # block the install (some CI/headless scenarios won't have a GUI).
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
+  sleep 1
+  open -R "${INSTALL_DIR}/wechat-bridge" 2>/dev/null || true
+  echo "已打开。请：把 Finder 里的 wechat-bridge 拖到设置窗里 + 打开右侧开关。"
+  echo ""
+  printf '%s拖完后跑一条命令验证 + 重启 bridge：%s\n' "${C_YELLOW}" "${C_RESET}"
+  echo ""
+  printf '   %s%s wechat doctor --fix-tcc%s\n' "${C_GREEN}" "${INSTALL_DIR}" "${C_RESET}"
+  echo ""
+  echo "（这条命令会再次开窗口 + 验证授权 + 重启 LaunchAgent，最多 30 秒。"
+  echo " 如果你已经在前两步窗口里勾完了，跑它只是为了 verify + restart bridge。）"
+  echo ""
+  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+  echo ""
 fi
-echo ""
 
 # Print installed CLI version + the supported WeChat matrix so the user
 # immediately knows what they got and what their WeChat needs to look like.
