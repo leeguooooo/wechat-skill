@@ -186,15 +186,47 @@ fi
 #
 # bootout + bootstrap is idempotent + ~2s overhead. Cheaper than the
 # half-hour of confused debugging it saves.
+#
+# CRITICAL: kill any stray manually-launched wechat-bridge first. Real
+# customer report (v1.10.31 era): they had a hand-started bridge from
+# weeks ago holding port 18400. LaunchAgent got stuck in "spawn
+# scheduled / active=0" indefinitely because bind failed silently. The
+# stray bridge had no plist env, no v1.10.30 codesign, no v1.10.31 logs.
+# Customer thought new install was running but actually nothing changed.
+# install.sh must own this — clean up rogue processes before bootstrap.
 LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/ai.wechat.bridge.plist"
+STRAY_PIDS=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null || true)
+if [[ -n "${STRAY_PIDS}" ]]; then
+  info "杀掉旧 wechat-bridge 进程（pid: ${STRAY_PIDS}），让 LaunchAgent 重新接管"
+  echo "${STRAY_PIDS}" | xargs kill 2>/dev/null || true
+  sleep 2
+  # SIGKILL fallback if any survived TERM
+  STRAY_PIDS=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null || true)
+  if [[ -n "${STRAY_PIDS}" ]]; then
+    echo "${STRAY_PIDS}" | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
+fi
 if [[ -f "${LAUNCHAGENT_PLIST}" ]]; then
   info "重新加载 LaunchAgent ai.wechat.bridge（bootout + bootstrap，刷新 env）"
   launchctl bootout "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
   sleep 1
   launchctl bootstrap "gui/$(id -u)" "${LAUNCHAGENT_PLIST}" 2>/dev/null || true
+  sleep 2
+  # Verify the running bridge is actually launchd-managed (not another
+  # stray manually-launched copy). If launchd's job is "spawn scheduled"
+  # but never reaches "running", port 18400 is probably blocked.
+  RUNNING_PID=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null | head -1)
+  if [[ -n "${RUNNING_PID}" ]]; then
+    success "LaunchAgent 已接管 (pid=${RUNNING_PID})"
+  else
+    LD_STATE=$(launchctl print "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null \
+      | grep -E "^\s+state\s*=" | head -1 | awk '{print $3}')
+    warn "LaunchAgent 启动后看不到 wechat-bridge 进程 (state=${LD_STATE:-unknown})"
+    warn "  常见原因：端口 18400 被另一进程占用 / plist 配置错"
+    warn "  排错: lsof -nP -iTCP:18400 | grep LISTEN"
+  fi
 elif launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
-  # LaunchAgent registered but plist file missing — degraded state.
-  # Fall back to kickstart so at least the new binary loads.
   info "LaunchAgent 注册但 plist 不在标准路径，用 kickstart 重启"
   launchctl kickstart -k "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
 fi
