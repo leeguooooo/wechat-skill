@@ -259,7 +259,17 @@ done
 if [[ ${TCC_OK} -eq 1 ]]; then
   success "Accessibility TCC: 已授权 ✓"
   echo ""
+elif [[ -t 0 && -t 1 ]]; then
+  # Interactive TTY: drive the full doctor --fix-tcc flow inline. Customer
+  # only has to drag wechat-bridge in the window we open and press Enter.
+  echo ""
+  warn "Accessibility TCC 未授权 —— 直接进交互修复"
+  echo ""
+  exec "${INSTALL_DIR}/wechat" doctor --fix-tcc
 else
+  # Non-interactive (curl | bash): can't read stdin. Fall back to
+  # opening the two GUI windows + a big red banner so the customer
+  # can't miss the step. They re-run `wechat doctor --fix-tcc` after.
   # TCC missing — auto-trigger the GUI windows so user can't miss the step.
   # Many customers skim past a single yellow warn line and end up with a
   # silently broken send path. Open the Accessibility pane + a Finder
