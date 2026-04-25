@@ -128,37 +128,48 @@ for BIN_NAME in "${BINS[@]}"; do
   # With a stable --identifier, some macOS builds will recognize the
   # new binary as a continuation of the previous grant and skip the
   # re-auth prompt. Not guaranteed (Sonoma+ is strict), but measurably
-  # better than nothing. Cost: ~50ms. Only matters for wechat-bridge
-  # and wechatd (CGEventPostToPid callers); `wechat` CLI doesn't need
-  # it but we sign all three for consistency + future-proofing.
+  # better than nothing.
   #
-  # Don't suppress stderr — if codesign fails for any reason (no
-  # `codesign` binary, broken entitlements, etc.), the user needs to
-  # see it rather than hear that install "succeeded".
+  # CRITICAL: only sign if the existing signature isn't already ours.
+  # Re-running `codesign --force` on a binary that ALREADY has our
+  # stable identifier still rotates the CDHash, which on Sonoma+ is
+  # often enough to invalidate the existing TCC grant. So we skip the
+  # sign when the binary's already correctly signed (e.g. user re-ran
+  # install.sh with no upgrade). Customer report v1.10.32: every reinstall
+  # was kicking them out of Accessibility because of unconditional
+  # `--force` re-signing.
   IDENTIFIER="ai.wechatskill.${BIN_NAME}"
-  CODESIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/wechat-install-codesign.XXXXXX")
-  if [[ -w "${INSTALL_DIR}/${BIN_NAME}" ]]; then
-    codesign --force --sign - --identifier "${IDENTIFIER}" \
-      "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
-    CS_RC=$?
+  EXISTING_IDENT=$(codesign -dv "${INSTALL_DIR}/${BIN_NAME}" 2>&1 \
+    | awk -F'=' '/^Identifier=/ { print $2 }' | tr -d '\r')
+  if [[ "${EXISTING_IDENT}" == "${IDENTIFIER}" ]]; then
+    # Already signed by us with the same identifier — leave alone, TCC
+    # is presumably still in effect.
+    info "${BIN_NAME} 已 ad-hoc 签名 (${IDENTIFIER})，跳过 re-sign 保留 TCC 授权"
   else
-    sudo codesign --force --sign - --identifier "${IDENTIFIER}" \
-      "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
-    CS_RC=$?
-  fi
-  if [[ ${CS_RC} -ne 0 ]]; then
-    warn "codesign 对 ${BIN_NAME} 失败（rc=${CS_RC}）："
-    sed 's/^/    /' "${CODESIGN_ERR}" >&2
-    warn "  binary 已安装但未签名；Accessibility TCC 可能每次升级都要重新勾"
-  else
-    # Verify signature was actually applied — helps catch "silent"
-    # codesign no-ops where exit 0 but sig wasn't written.
-    if ! codesign --verify "${INSTALL_DIR}/${BIN_NAME}" 2>>"${CODESIGN_ERR}"; then
-      warn "codesign --verify ${BIN_NAME} 不通过 —— 签名可能没真正落到 binary 上"
-      sed 's/^/    /' "${CODESIGN_ERR}" >&2
+    CODESIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/wechat-install-codesign.XXXXXX")
+    if [[ -w "${INSTALL_DIR}/${BIN_NAME}" ]]; then
+      codesign --force --sign - --identifier "${IDENTIFIER}" \
+        "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
+      CS_RC=$?
+    else
+      sudo codesign --force --sign - --identifier "${IDENTIFIER}" \
+        "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
+      CS_RC=$?
     fi
+    if [[ ${CS_RC} -ne 0 ]]; then
+      warn "codesign 对 ${BIN_NAME} 失败（rc=${CS_RC}）："
+      sed 's/^/    /' "${CODESIGN_ERR}" >&2
+      warn "  binary 已安装但未签名；Accessibility TCC 可能每次升级都要重新勾"
+    else
+      # Verify signature was actually applied — catches "silent"
+      # codesign no-ops where exit 0 but sig wasn't written.
+      if ! codesign --verify "${INSTALL_DIR}/${BIN_NAME}" 2>>"${CODESIGN_ERR}"; then
+        warn "codesign --verify ${BIN_NAME} 不通过 —— 签名可能没真正落到 binary 上"
+        sed 's/^/    /' "${CODESIGN_ERR}" >&2
+      fi
+    fi
+    rm -f "${CODESIGN_ERR}"
   fi
-  rm -f "${CODESIGN_ERR}"
 
   success "已安装：${INSTALL_DIR}/${BIN_NAME}"
 done
