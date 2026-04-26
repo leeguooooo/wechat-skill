@@ -139,34 +139,43 @@ for BIN_NAME in "${BINS[@]}"; do
   # was kicking them out of Accessibility because of unconditional
   # `--force` re-signing.
   IDENTIFIER="ai.wechatskill.${BIN_NAME}"
-  EXISTING_IDENT=$(codesign -dv "${INSTALL_DIR}/${BIN_NAME}" 2>&1 \
-    | awk -F'=' '/^Identifier=/ { print $2 }' | tr -d '\r')
+  # Probe existing signature. `codesign -dv` exits non-zero on unsigned
+  # binaries (most fresh installs); `set -euo pipefail` would propagate the
+  # pipeline failure into the assignment and abort the installer. Wrap in
+  # `if cmd; then ...; else ...; fi` so the failure is consumed explicitly.
+  CS_PROBE=$(mktemp "${TMPDIR:-/tmp}/wechat-install-cs-probe.XXXXXX")
+  if codesign -dv "${INSTALL_DIR}/${BIN_NAME}" 2>"${CS_PROBE}"; then
+    EXISTING_IDENT=$(awk -F'=' '/^Identifier=/ { print $2 }' "${CS_PROBE}" | tr -d '\r')
+  else
+    EXISTING_IDENT=""
+  fi
+  rm -f "${CS_PROBE}"
+
   if [[ "${EXISTING_IDENT}" == "${IDENTIFIER}" ]]; then
     # Already signed by us with the same identifier — leave alone, TCC
     # is presumably still in effect.
     info "${BIN_NAME} 已 ad-hoc 签名 (${IDENTIFIER})，跳过 re-sign 保留 TCC 授权"
   else
     CODESIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/wechat-install-codesign.XXXXXX")
+    # `set -e` would abort the installer on non-zero codesign before we ever
+    # reach the warn branch. Use `if codesign; then ...; else ...; fi` so the
+    # failure is observed and surfaced rather than killing the run.
     if [[ -w "${INSTALL_DIR}/${BIN_NAME}" ]]; then
-      codesign --force --sign - --identifier "${IDENTIFIER}" \
-        "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
-      CS_RC=$?
+      CODESIGN_CMD=(codesign --force --sign - --identifier "${IDENTIFIER}" "${INSTALL_DIR}/${BIN_NAME}")
     else
-      sudo codesign --force --sign - --identifier "${IDENTIFIER}" \
-        "${INSTALL_DIR}/${BIN_NAME}" 2>"${CODESIGN_ERR}"
-      CS_RC=$?
+      CODESIGN_CMD=(sudo codesign --force --sign - --identifier "${IDENTIFIER}" "${INSTALL_DIR}/${BIN_NAME}")
     fi
-    if [[ ${CS_RC} -ne 0 ]]; then
-      warn "codesign 对 ${BIN_NAME} 失败（rc=${CS_RC}）："
-      sed 's/^/    /' "${CODESIGN_ERR}" >&2
-      warn "  binary 已安装但未签名；Accessibility TCC 可能每次升级都要重新勾"
-    else
+    if "${CODESIGN_CMD[@]}" 2>"${CODESIGN_ERR}"; then
       # Verify signature was actually applied — catches "silent"
       # codesign no-ops where exit 0 but sig wasn't written.
       if ! codesign --verify "${INSTALL_DIR}/${BIN_NAME}" 2>>"${CODESIGN_ERR}"; then
         warn "codesign --verify ${BIN_NAME} 不通过 —— 签名可能没真正落到 binary 上"
         sed 's/^/    /' "${CODESIGN_ERR}" >&2
       fi
+    else
+      warn "codesign 对 ${BIN_NAME} 失败："
+      sed 's/^/    /' "${CODESIGN_ERR}" >&2
+      warn "  binary 已安装但未签名；Accessibility TCC 可能每次升级都要重新勾"
     fi
     rm -f "${CODESIGN_ERR}"
   fi

@@ -84,7 +84,7 @@ Endpoints:
 | POST | `/send` | send_text — returns `{status: delivered / submitted_unconfirmed / status_unknown / failed, diagnostic, ...}` |
 | GET  | `/messages/stream` | new_messages_since polled into SSE |
 
-### SSE payload shape (v1.10.27 — Wechaty-aligned)
+### SSE payload shape (v1.10.28 — Wechaty-aligned + isMentioned)
 
 `/messages/stream` emits `event: messages` carrying a JSON array of:
 
@@ -101,6 +101,7 @@ Endpoints:
   mediaType: "image"|"voice"|"video"|"file"|"",
   mediaUrls: string[],           // first entry is CDN URL when applicable
   mentionedIds: string[],        // v1.10.25+ — authoritative @-mention list from WeChat msgsource <atuserlist>
+  isMentioned: boolean,          // v1.10.28+ — bridge-authoritative "this row @-mentions ME". Self-sent rows are always false.
   quotedParticipant: string,     // v1.10.27+ — populated from refer.fromUser on quote replies
   botIds: string[],              // legacy heuristic self-marker; NEW consumers should rely on fromSelf instead
   fromSelf: boolean,             // v1.10.25+ — bridge-authoritative "this row was produced by our own POST /send"; DROP THESE to avoid self-echo loops
@@ -116,12 +117,12 @@ Endpoints:
 }
 ```
 
-The full JSON Schema is committed at [`wx/schema/sse-payload-v1.10.27.schema.json`](https://github.com/leeguooooo/wechat-skill/blob/main/wx/schema/sse-payload-v1.10.27.schema.json) and enforced by a contract test in the daemon build.
+The full JSON Schema is committed at [`wx/schema/sse-payload-v1.10.28.schema.json`](https://github.com/leeguooooo/wechat-skill/blob/main/wx/schema/sse-payload-v1.10.28.schema.json) and enforced by a contract test in the daemon build.
 
 **Consumer checklist:**
 
 - Filter self-echo with `fromSelf === true`. Do NOT use `senderId === myWxid` — in DM both directions share the same senderId.
-- In groups, only respond when `isGroup && mentionedIds.includes(myWxid)` (or your bot's nickname shows up in body as `@name `).
+- In groups, only respond when `isGroup && isMentioned` — the daemon already does the wxid-vs-atuserlist comparison, so don't reimplement `mentionedIds.includes(myWxid)` yourself (your wxid may be a remark / lookup that the daemon resolves correctly). The bridge will also drop non-`@` group rows automatically when `WECHAT_BRIDGE_GROUP_MENTION_ONLY=1`.
 - Need the URL only? `mediaUrls[0]`. Need aesKey + md5 to decrypt or verify? `media.cdnUrl / media.aesKey / …`.
 - Expect `body` for URL / quote / mini_program to be the human title. If you were previously parsing raw `<appmsg>` XML from body, migrate to the dedicated `urlLink` / `miniProgram` / `refer` objects.
 - Backward compatible: every pre-v1.10.25 field is preserved in name + type. New fields are additive.

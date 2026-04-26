@@ -1,5 +1,76 @@
 # 更新日志
 
+## v1.10.32 — 2026-04-26
+
+代码 review 复盘修补 + Wechaty gateway 重新启用：
+
+### 🆕 Wechaty Puppet gRPC gateway — 真客户端 e2e 通过
+
+`wechat-wechaty-gateway` bin（127.0.0.1:18401，Bearer token 鉴权）从 v1.7
+之后第一次重新可编译可服务。**已用真 npm `wechaty@1.20.2` + `wechaty-puppet-service@1.19.9`
+端到端验证**：start 握手 / Login 事件（带真账号）/ Event 流持续推真消息（text/image/video/
+miniprogram/attachment 全 type 正确），不再只是单元测试。
+
+意义：wechaty 生态（TypeScript / Python / Go SDK）能直接把本仓当 puppet provider，
+不再被锁在 wechat-bridge 的 hermes HTTP/SSE 一种 shape。
+
+- **🔒 订阅 gate**：每一个数据 RPC（contact / message / room / event / ...）都必须通过订阅校验才能返回数据。bearer 单独不解锁数据 —— bearer 只是 transport auth，wxp_act_ 才是 entitlement。`Ding` 是唯一 ungated 的（pure 心跳）。`NotActivated` → `Unauthenticated: missing activation`；`Expired` → `PermissionDenied`；客户端在 `start()` 就能拿到清晰错误
+- 全量适配上游 `Puppet` 服务最新 schema (pinned SHA `f1ecd6c`，2026-04-25)
+- 78 个 RPC 方法（Version / Ding / Start / ContactList / MessageSendText / Event 等）实现
+- `MessagePayloadResponse` 完整填充：`MessageType` enum 映射、`talker_id`/`room_id`/`listener_id`/
+  `mention_ids`/`receive_time`，wechaty `message` 事件直接消费
+- `Login` event 自动在 Event 订阅时发出，带真 self_wxid（daemon ping 现在返回 wxid）
+- 30 个 read-only getter（`ContactPayload`/`ContactAvatar`/`RoomMemberList` 等）改返 empty success
+  而非 `Unimplemented`，避免 wechaty puppet 在 cache 拉满时 bail
+- daemon client 加连接池（Mutex<DaemonClient>），消除高频 RPC 时套接字 stampede
+- 加 build.rs 用 `protoc-bin-vendored` 编 vendored proto，系统不需装 protoc
+- `Download` / `Upload` streaming RPC 暂返 `Unimplemented`（v1.12 真做文件流）
+
+启动：
+```bash
+WECHATY_GATEWAY_BEARER=your-secret wechat-wechaty-gateway
+# 默认 127.0.0.1:18401
+```
+
+Node 客户端：
+```js
+import { WechatyBuilder } from 'wechaty'
+import { PuppetService } from 'wechaty-puppet-service'
+const puppet = new PuppetService({
+  token: 'puppet_workpro_test',
+  endpoint: '127.0.0.1:18401',
+  tls: { disable: true },
+})
+const wechaty = WechatyBuilder.build({ puppet })
+wechaty.on('login', (u) => console.log('logged in as', u.id))
+wechaty.on('message', (m) => console.log(m.type(), m.talker()?.id, m.text()))
+await wechaty.start()
+```
+
+### 🐛 Review 复盘修补（无新功能，专门解 v1.10.31 review 找到的几个根因）：
+
+- **`install.sh` codesign 块在 `set -euo pipefail` 下结构性死锁**：旧代码 `EXISTING_IDENT=$(codesign -dv ...)` 在新装机器（无签名）会让 `codesign` 返回非零、`set -e` 直接 abort installer；`codesign --force ... ; CS_RC=$?` 也是 `set -e` 在 codesign 失败时直接退出，永远走不到 warn 分支。改成 `if cmd; then …; else …; fi` 显式控制流，并加自测验证两条路径
+- **bridge env-bool 拼错触发 KeepAlive 死循环**：`WECHAT_BRIDGE_GROUP_MENTION_ONLY=ye`（漏字母）以前会让 bridge `bail!` → exit → launchd 立即重生 → 无限循环烧 CPU。现在改成 warn + 用默认值，bridge 仍正常启
+- **bridge AX preflight 失败时 launchd 立即重生**：每秒一轮 `lldb attach + dyld load` 烧爆。preflight 失败前现在 `sleep 30` 节流
+- **SSE 行 `is_mentioned` 偶发 false negative**：daemon 三处 SELECT 各自重写一份 `sender_wxid.is_empty()` 判定，把"DM 自发"和"群消息 prefix 解码失败"两种语义压成一种 → 群 @ 静默丢。抽 `assemble_extras` 单一入口，`is_none()` 区分两态，遇到第二种 log 警告
+- **`widget+0x2B8` SSO/long 形态判别**：旧 heuristic `0x100000000 <= ptr < 0x800000000` 在 ARM64 ASLR 下不可靠（user heap 经常超 32GB），猜错 → 把堆指针字段当 SSO 内联覆盖 → libc++ 析构 free 野指针 → WeChat 进程级崩。换成 libc++ 标准的 `bytes[23] & 0x80` 判别位，VM 上限放宽到 47-bit
+- **公开仓 SKILL/README/CHANGELOG 落后 4 个 release**：补上 `isMentioned`、schema URL → v1.10.28、客户清单改为"看 isMentioned 就够"
+
+> v1.10.32 = "review 找出的隐患都修干净再 ship"。客户没新行为差异，但抗操作风险一档上升
+
+## v1.10.28–31 — 2026-04-25/26
+
+群 @ 机器人不响应根治 + TCC 升级体验改进：
+
+- **`isMentioned` 字段直接判**：daemon 解 atuserlist + 比对自己 wxid，bridge 输出布尔。客户群机器人不用再自己拼 `mentionedIds.includes(myWxid)`
+- **`WECHAT_BRIDGE_GROUP_MENTION_ONLY=1`**：bridge 出口 filter，群里非 @ 的消息直接丢，agent 端 0 改造
+- **`packed local_type` mask 修**：v1.10.27 漏 mask 0xFFFF，导致部分群消息分类落到 unknown
+- **bridge 启动 + filter 全程 structured logging**：`[bridge:startup]` 一行 dump effective config，`[bridge:filter] drop/pass` 每条决策点；客户截 5 行 log 就能定位
+- **BP install timeout 10s → 30s**：v1.10.30 install.sh 加 `codesign --force` 之后 macOS 重校验签名 + dyld 缓存 8-12s，旧 10s 卡 borderline
+- **`install.sh` 自动 codesign + idempotent + orphan kill**：每次升级保留 TCC 授权（不重签同 identifier），杀掉残留 wechat-bridge 进程让 LaunchAgent 真正接管，`bootout + bootstrap` 强 reload plist env（kickstart 不重读 EnvironmentVariables）
+- **`wechat doctor --fix-tcc`**：交互式 TCC 修复——开 System Settings + Finder 选中 wechat-bridge，3 次重试后自动 `--check-trust` 验证
+- **三级硬 release gate**：`scripts/publish-release.sh` 走 draft → 模拟 install → SHA256SUMS 双重校验 → publish
+
 ## v1.10.27 — 2026-04-25
 
 SSE payload 对齐 Wechaty `MessageType` 枚举。bridge 给非 CLI-based agent 平台（Hermes / n8n / Dify / LangChain）一个可直接消费的富消息流。
