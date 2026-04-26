@@ -6,7 +6,7 @@
 set -euo pipefail
 
 REPO="leeguooooo/wechat-skill"
-BINS=(wechat wechatd wechat-bridge)
+BINS=(wechat wechatd wechat-bridge wechat-wechaty-gateway)
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Verified WeChat builds — keep in sync with VERIFIED_DYLIB_FINGERPRINTS in
