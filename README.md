@@ -162,7 +162,8 @@ wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape
 
 要把本机微信变成任意 wechaty bot 的后端？跑 `wechat-wechaty-gateway`（默认 `127.0.0.1:18401`），任何 [wechaty](https://github.com/wechaty/wechaty) TypeScript / Python / Go 客户端都能直连。订阅 gate 同 bridge：每个数据 RPC 都校验 `wxp_act_`。
 
-实战示例（echo bot / 群 @ 过滤 / LLM 接入）→ **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)**。
+- 终端 bot 示例（echo bot / 群 @ 过滤 / LLM 接入）→ **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)**
+- 网页版微信 demo（Svelte SPA + 通过 wechaty SDK 接入）→ **[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo)**
 
 ---
 
