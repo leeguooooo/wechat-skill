@@ -158,6 +158,12 @@ wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape
 
 详细 schema 见 [SKILL.md](./SKILL.md#http-bridge-for-agent-integration-v110) + [docs/capabilities.md](./docs/capabilities.md#接-agent-平台hermes--n8n--dify--langchain)。
 
+### Wechaty Puppet gRPC gateway（v1.10.32+）
+
+要把本机微信变成任意 wechaty bot 的后端？跑 `wechat-wechaty-gateway`（默认 `127.0.0.1:18401`），任何 [wechaty](https://github.com/wechaty/wechaty) TypeScript / Python / Go 客户端都能直连。订阅 gate 同 bridge：每个数据 RPC 都校验 `wxp_act_`。
+
+实战示例（echo bot / 群 @ 过滤 / LLM 接入）→ **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)**。
+
 ---
 
 ## 出问题了？
