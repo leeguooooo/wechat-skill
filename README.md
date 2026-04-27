@@ -162,8 +162,33 @@ wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape
 
 要把本机微信变成任意 wechaty bot 的后端？跑 `wechat-wechaty-gateway`（默认 `127.0.0.1:18401`），任何 [wechaty](https://github.com/wechaty/wechaty) TypeScript / Python / Go 客户端都能直连。订阅 gate 同 bridge：每个数据 RPC 都校验 `wxp_act_`。
 
-- 终端 bot 示例（echo bot / 群 @ 过滤 / LLM 接入）→ **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)**
-- 网页版微信 demo（Svelte SPA + 通过 wechaty SDK 接入）→ **[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo)**
+```bash
+wechat-wechaty-gateway &       # 起 gRPC 监听 127.0.0.1:18401
+```
+
+```ts
+// 任意 wechaty 1.x 客户端，零改动接你本机微信
+import { WechatyBuilder } from 'wechaty';
+const bot = WechatyBuilder.build({
+  puppet: 'wechaty-puppet-service',
+  puppetOptions: {
+    endpoint: '127.0.0.1:18401',
+    token: 'puppet_workpro_local',
+    tls: { disable: true },
+  },
+});
+bot.on('message', m => m.text() === 'ping' && m.say('pong'));
+bot.start();
+```
+
+意味着：你已经写好的任意 wechaty bot（npm 上几百个 plugin、各种 LLM 接入示例）**不改一行代码**就能跑在自己的真号上，不再需要 puppet-wechat / puppet-padlocal / iPad 协议这些灰产路径。
+
+#### 配套 demo
+
+- **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)** — 终端 bot 示例（echo / 群 @ 过滤 / LLM 接入），三个文件就能跑
+- **[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo)** — 一个完整的**网页版微信**（Svelte 5 + Tailwind + 通过 wechaty SDK 接入 gateway），可直接 fork 改成你自己的微信机器人 / 客服系统 / 群管平台前端
+
+![web demo screenshot](docs/images/wechat-skill-web-demo.png)
 
 ---
 
