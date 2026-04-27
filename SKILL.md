@@ -1,15 +1,15 @@
 ---
 name: wechat
-description: macOS WeChat CLI + local HTTP bridge — send messages, query sessions / contacts / chat history / Moments / favorites, and expose a stable HTTP surface for agent integration. Use when the user asks to "send a WeChat message", "发微信", query WeChat contacts/groups/messages, look up who said what in a chat, read moments / 朋友圈, export chat history, or wire WeChat into Hermes / n8n / Dify / LangChain. Requires WeChat 4.1.8 on macOS (Apple Silicon) and a `wxp_act_` activation code. One-time `wechat init` extracts the DB key; no sudo, no re-signing WeChat.app.
+description: macOS WeChat CLI + local HTTP bridge + Wechaty Puppet gRPC gateway — send messages, query sessions / contacts / chat history / Moments / favorites, and expose stable HTTP / gRPC surfaces for agent integration. Use when the user asks to "send a WeChat message", "发微信", query WeChat contacts/groups/messages, look up who said what in a chat, read moments / 朋友圈, export chat history, wire WeChat into Hermes / n8n / Dify / LangChain, or run any wechaty bot on a real macOS WeChat account. Requires WeChat 4.1.8 on macOS (Apple Silicon) and a `wxp_act_` activation code. One-time `wechat init` extracts the DB key; no sudo, no re-signing WeChat.app.
 metadata:
   author: leeguooooo
-  version: "1.10.0"
+  version: "1.10.39"
   platform: macOS-arm64
   requires:
     - macOS >= 14 (Apple Silicon)
     - WeChat 4.1.8 (CFBundleVersion 36830 / 37335 / 37342) running
     - LLDB (Xcode Command Line Tools)
-    - Accessibility permission for the Terminal (only for `send`)
+    - Accessibility permission for `wechat-bridge` (macOS Sonoma+, only for `send`; Terminal itself does NOT need it)
     - Activation code (wxp_act_…) from @WechatCliBot — subscribe the official Telegram channel first
 ---
 
@@ -145,6 +145,7 @@ The full JSON Schema is committed at [`wx/schema/sse-payload-v1.10.28.schema.jso
 | **Realtime (v1.3+)** | `listen` | daemon auto-starts on demand (v1.7.5) |
 | **Daemon (v1.2+)** | `daemon start\|stop\|status\|ping` | optional — query/listen commands pull it up automatically when needed |
 | **HTTP Bridge (v1.10+)** | `wechat-bridge` (separate binary) | agent / Hermes / n8n integration over localhost HTTP — see section below |
+| **Wechaty Puppet gateway (v1.10.32+)** | `wechat-wechaty-gateway` (separate binary, gRPC :18401) | for the human writing a wechaty bot — NOT used by this skill. If the user asks "can I run my wechaty bot on this?", point them to https://github.com/leeguooooo/wechat-skill#接-ai-agent and stop. Don't try to write wechaty TS from this skill. |
 | **Auth (v1.9.1+)** | `auth activate \| status \| renew` | mandatory activation before `send` — code from @WechatCliBot on Telegram |
 
 All query commands default to **YAML output** (agent-friendly, low token). Add `--json` to get JSON.
