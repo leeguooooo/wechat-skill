@@ -187,6 +187,48 @@ prompt_tcc_grant_via_dialog() {
   return 1
 }
 
+# Optional post-flight smoke send to filehelper. Two reasons:
+#   1. WeChat's Qt slot_send signal chain only wires after a real
+#      user-initiated send; right after a bridge bootout/bootstrap the
+#      first send via daemon hits `delivery_verify_timeout`. Doing one
+#      send to filehelper warms up the chain transparently. Without
+#      this the user's first real send (or hermes' first reply) silently
+#      fails and the user is left wondering why.
+#   2. Cheap end-to-end verify: CLI → daemon → bridge → WeChat → DB.
+#
+# Skipped silently when prerequisites (init / auth / WeChat running)
+# aren't in place — this is a smoke test, not an init replacement.
+maybe_smoke_send() {
+  local config_file="${HOME}/.wx-rs/config.json"
+  # Init hasn't run → no key, no daemon — silent skip.
+  if [[ ! -f "${config_file}" ]]; then
+    return 0
+  fi
+  # Auth: just probe whether the CLI can read a token. v1.9+ refuses
+  # to send without an active subscription; surfacing that here would
+  # confuse a fresh installer who hasn't activated yet.
+  if ! "${INSTALL_DIR}/wechat" auth status >/dev/null 2>&1; then
+    info "filehelper smoke send 已跳过（订阅未激活；激活后跑：wechat send 'hi' filehelper）"
+    return 0
+  fi
+  # WeChat running? Without it the daemon can't attach to the dylib.
+  if ! pgrep -x WeChat >/dev/null 2>&1; then
+    info "filehelper smoke send 已跳过（WeChat 未运行；启动 WeChat 后跑：wechat send 'hi' filehelper）"
+    return 0
+  fi
+  info "跑 filehelper smoke send：wire WeChat slot_send signal chain + 端到端验证"
+  local stamp output
+  stamp=$(date '+%H:%M:%S')
+  if output=$("${INSTALL_DIR}/wechat" send "[install] smoke ${stamp}" filehelper 2>&1); then
+    success "filehelper smoke 通过：CLI → daemon → bridge → WeChat → DB 全链路 OK"
+  else
+    warn "filehelper smoke 失败 —— InputView 信号链未 wire / daemon 未就绪 / dylib 状态异常"
+    printf '%s\n' "${output}" | sed 's/^/    /' >&2
+    warn "  解法：在 WeChat 任意聊天 GUI 里【手动】发一条消息（warmup slot_send），"
+    warn "  然后再跑：${INSTALL_DIR}/wechat send 'hi' filehelper"
+  fi
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   err "macOS only"
   exit 1
@@ -414,6 +456,7 @@ fi
 #   neither              → other crash cause (port / plist env / signature)
 if wait_for_bridge_health; then
   success "Accessibility TCC: 已授权 ✓ (bridge /health 200 OK)"
+  maybe_smoke_send
   echo ""
 elif bridge_log_says_tcc_missing; then
   if [[ -t 0 && -t 1 ]]; then
@@ -424,6 +467,7 @@ elif bridge_log_says_tcc_missing; then
     exec "${INSTALL_DIR}/wechat" doctor --fix-tcc
   elif gui_available && prompt_tcc_grant_via_dialog; then
     success "Accessibility TCC: 已授权 ✓ + bridge /health 200 OK (dialog flow)"
+    maybe_smoke_send
     echo ""
   else
     # Either no GUI (SSH / CI) or user cancelled / 3 attempts exhausted.
