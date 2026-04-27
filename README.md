@@ -3,21 +3,19 @@
 把你自己 macOS 上的微信，变成给 AI agent / bot 用的**本地 API**。
 不上云、不上 iPad 协议、不爬别人 —— 纯本地 LLDB + 进程内 hook，所有数据只在你这台 Mac 上动。
 
-![web demo screenshot](docs/images/wechat-skill-web-demo.png)
-
-> 上图：[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo) —— 一个用我们的 wechaty puppet gateway 跑起来的网页版微信。Svelte 5 + Tailwind，可直接 fork 改成你自己的客服 / 群管 / bot 前端。
-
 ---
 
 ## 5 秒看明白
 
+按吸引力排序，挑一个进：
+
 | 你在用 | 装这个 | 做什么 |
 |---|---|---|
-| Claude Code / Codex / Cursor | [SKILL.md](./SKILL.md) | agent 自动学会发消息、查记录、收消息流 |
-| Hermes / OpenClaw / n8n / Dify / LangChain | `wechat-bridge`（HTTP + SSE） | WeChat 变成跟 WhatsApp/Slack 同 shape 的本地接口 |
-| 任意 [wechaty](https://github.com/wechaty/wechaty) bot（TS / Python / Go） | `wechat-wechaty-gateway`（gRPC :18401） | 你写好的 wechaty bot 零改动跑在真号上 |
-| 网页版微信 / 自定义前端 | fork [wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo) | Svelte SPA，已接好 wechaty SDK |
-| 直接命令行 | `wechat send/sessions/listen/...` | 一行命令发消息、查记录、订阅消息流 |
+| **Claude Code / Codex / Cursor** | [SKILL.md](./SKILL.md) | agent 自动学会发消息、查记录、收消息流 —— 让 Claude 帮你回微信 |
+| **直接命令行** | `wechat send / sessions / listen` | 一行命令发消息 / 查记录 / 订阅消息流，shell 脚本和 cron 友好 |
+| **任意 [wechaty](https://github.com/wechaty/wechaty) bot（TS / Python / Go）** | `wechat-wechaty-gateway`（gRPC :18401） | **首个真号 wechaty macOS 协议**。已写好的 wechaty bot 零改动跑在自己微信上，不再走 iPad / puppet-padlocal |
+| Hermes / OpenClaw / n8n / Dify / LangChain | `wechat-bridge`（HTTP + SSE） | WeChat 变成跟 WhatsApp / Slack 同 shape 的本地接口 |
+| 想要网页版微信 / 自定义前端 | fork [wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo) | Svelte 5 + Tailwind 已接好 wechaty SDK，开箱即用 |
 
 所有 surface 共享同一个 daemon + 同一个激活码，**装一次全开**。
 
@@ -80,30 +78,17 @@ wechat doctor                         # 任何时候出问题先跑这个
 
 ## 接 AI agent
 
-### A. CLI-agent（Claude Code / Codex / Cursor）
+### A. Claude Code / Codex / Cursor（SKILL.md）
 
 ```bash
 npx skills add leeguooooo/wechat-skill -y -g
 ```
 
-agent 读 [SKILL.md](./SKILL.md) 自动学会全部命令。**先装 CLI 再装 skill**，顺序反了 agent 会以为命令不存在。
+agent 读 [SKILL.md](./SKILL.md) 自动学会全部命令 —— "帮我回一下张三的消息"、"把昨天群里讨论 X 的消息归档"、"等小李回我后告诉我"。**先装 CLI 再装 skill**，顺序反了 agent 会以为命令不存在。
 
-### B. HTTP-native agent（Hermes / OpenClaw / n8n / Dify / LangChain）
+### B. 任意 wechaty bot（v1.10.32+）
 
-独立二进制 `wechat-bridge`，本地 HTTP + SSE：
-
-```bash
-wechat-bridge &                          # 默认 127.0.0.1:18400
-wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape，零适配
-```
-
-8 个稳定路由：`/health` / `/send` / `/chats` / `/unread` / `/contacts` / `/chat/:wxid` / `/chat/:wxid/history` / `/resolve` / `/messages/stream`（SSE）。
-
-> Hermes / OpenClaw 已经接了 WhatsApp / Telegram / Discord / Slack / Signal / iMessage，没内建 WeChat —— `wechat-bridge` 就是他们接微信的标准入口。
-
-SSE payload 字段（`messageKind` / `mentionedIds` / `isMentioned` / `fromSelf` / `urlLink` / `miniProgram` / `refer` / `recall` / `media` / …）固定在 [`wx/schema/sse-payload-v1.10.28.schema.json`](./wx/schema/sse-payload-v1.10.28.schema.json)。详细字段说明 → [docs/capabilities.md#http-bridge](./docs/capabilities.md#接-agent-平台hermes--n8n--dify--langchain)。
-
-### C. 任意 wechaty bot（v1.10.32+）
+**首个真号 wechaty macOS 协议**。你已经写好的任意 wechaty bot（npm 上几百个 plugin、各种 LLM 接入示例）**不改一行代码**就能跑在自己的真号上，不再需要 puppet-wechat / puppet-padlocal / iPad 协议这些灰产路径。
 
 ```bash
 wechat-wechaty-gateway &       # 起 gRPC 监听 127.0.0.1:18401
@@ -124,12 +109,27 @@ bot.on('message', m => m.text() === 'ping' && m.say('pong'));
 bot.start();
 ```
 
-意味着：你已经写好的任意 wechaty bot（npm 上几百个 plugin、各种 LLM 接入示例）**不改一行代码**就能跑在自己的真号上，不再需要 puppet-wechat / puppet-padlocal / iPad 协议这些灰产路径。
-
 配套示例：
 
 - **[wechat-skill-examples](https://github.com/leeguooooo/wechat-skill-examples)** — 终端 bot（echo / 群 @ 过滤 / LLM 接入），三个文件就能跑
-- **[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo)** — 完整网页版微信（截图见首屏），可直接 fork 改成自定义前端
+- **[wechat-skill-web-demo](https://github.com/leeguooooo/wechat-skill-web-demo)** — 完整网页版微信（Svelte 5 + Tailwind + wechaty SDK），可直接 fork 改成自定义前端
+
+![wechat-skill-web-demo](docs/images/wechat-skill-web-demo.png)
+
+### C. HTTP-native agent（Hermes / OpenClaw / n8n / Dify / LangChain）
+
+独立二进制 `wechat-bridge`，本地 HTTP + SSE：
+
+```bash
+wechat-bridge &                          # 默认 127.0.0.1:18400
+wechat-bridge --shape hermes &           # Hermes WhatsApp-bridge 同 shape，零适配
+```
+
+8 个稳定路由：`/health` / `/send` / `/chats` / `/unread` / `/contacts` / `/chat/:wxid` / `/chat/:wxid/history` / `/resolve` / `/messages/stream`（SSE）。
+
+> Hermes / OpenClaw 已经接了 WhatsApp / Telegram / Discord / Slack / Signal / iMessage，没内建 WeChat —— `wechat-bridge` 就是他们接微信的标准入口。
+
+SSE payload 字段（`messageKind` / `mentionedIds` / `isMentioned` / `fromSelf` / `urlLink` / `miniProgram` / `refer` / `recall` / `media` / …）固定在 [`wx/schema/sse-payload-v1.10.28.schema.json`](./wx/schema/sse-payload-v1.10.28.schema.json)。详细字段说明 → [docs/capabilities.md#http-bridge](./docs/capabilities.md#接-agent-平台hermes--n8n--dify--langchain)。
 
 ---
 
