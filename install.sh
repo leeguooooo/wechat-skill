@@ -37,6 +37,156 @@ err()     { printf '%s[install] ✗%s %s\n'    "${C_RED}"   "${C_RESET}" "$1" >&
 step()    { printf '%s[install] →%s %s\n'    "${C_YELLOW}" "${C_RESET}" "$1"; }
 cmd()     { printf '%s%s%s'                  "${C_CYAN}"  "$1"          "${C_RESET}"; }
 
+# Probe wechat-bridge /health on localhost:18400. Used to verify the
+# LaunchAgent is actually serving (vs. crash-looping at AX preflight).
+# 15s window covers cold start + cargo-build LaunchAgent jitter; in a
+# crash loop we'll burn ~10 spawn attempts inside this window, so a
+# negative result is reliable, not a false-negative on slow startup.
+wait_for_bridge_health() {
+  local deadline=$(( SECONDS + 15 ))
+  while (( SECONDS < deadline )); do
+    if curl -fsS -m 1 http://127.0.0.1:18400/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Fetch crash-loop diagnostic from launchctl + the bridge's own error log.
+# Customers with no TCC see "ai.wechat.bridge missing" — but the WHY is
+# in stderr (Accessibility TCC missing / port 18400 occupied / signature
+# tripped), and they'll never `tail` it on their own. Surface the real
+# reason inline so the next install step (TCC fix) is anchored to the
+# observed failure mode, not a guess.
+dump_bridge_diag() {
+  local label="${1:-bridge 未通过 /health 检查}"
+  # All output goes to stderr — keep it on a single stream so the
+  # diag block doesn't get reordered around stdout `success` lines
+  # under buffered pipes (`tee`, ssh, CI).
+  warn "${label}"
+  local print_out
+  print_out=$(launchctl print "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true)
+  if [[ -n "${print_out}" ]]; then
+    local last_exit runs state
+    last_exit=$(printf '%s\n' "${print_out}" | awk -F'=' '/last exit code/ { gsub(/ /,"",$2); print $2; exit }')
+    runs=$(printf '%s\n' "${print_out}" | awk -F'=' '/^[[:space:]]+runs[[:space:]]*=/ { gsub(/ /,"",$2); print $2; exit }')
+    state=$(printf '%s\n' "${print_out}" | awk -F'=' '/^[[:space:]]+state[[:space:]]*=/ { gsub(/^ +/,"",$2); print $2; exit }')
+    printf '    %slaunchctl: state=%s runs=%s last_exit=%s%s\n' \
+      "${C_DIM}" "${state:-?}" "${runs:-?}" "${last_exit:-?}" "${C_RESET}" >&2
+  fi
+  local log="${HOME}/.hermes/logs/wechat.bridge.error.log"
+  if [[ -f "${log}" ]]; then
+    printf '%s── 最近 30 行 bridge stderr (%s) ──%s\n' "${C_DIM}" "${log}" "${C_RESET}" >&2
+    tail -n 30 "${log}" 2>/dev/null | sed 's/^/    /' >&2
+    printf '%s── 日志结束 ──%s\n' "${C_DIM}" "${C_RESET}" >&2
+  else
+    printf '    %s（未找到 %s）%s\n' "${C_DIM}" "${log}" "${C_RESET}" >&2
+  fi
+}
+
+# Read bridge.error.log and decide whether the failure mode is "TCC
+# missing" specifically (vs. port conflict, plist env, or unknown).
+# `wechat-bridge --check-trust` is unreliable as ground truth because
+# AXIsProcessTrusted reads the *caller* process's trust state, and an
+# install.sh process forked from the user's shell can inherit Terminal /
+# iTerm / SSH agent's TCC grant — a false positive while the launchd-
+# spawned bridge service still gets rejected. The bridge's own preflight
+# stderr ("Accessibility TCC not granted") is the ground truth — it's
+# emitted by the same audit-token context that fails to serve.
+bridge_log_says_tcc_missing() {
+  local log="${HOME}/.hermes/logs/wechat.bridge.error.log"
+  [[ -f "${log}" ]] || return 1
+  # Match either of the two phrases preflight emits.
+  tail -n 60 "${log}" 2>/dev/null \
+    | grep -qE "Accessibility TCC (not granted|missing)"
+}
+
+# Probe whether a GUI is reachable from this script's session. curl|bash
+# over SSH or in CI has no Aqua session, so AppleScript dialogs would
+# fail with -1712 / -1719. Detect once so we can fall back to the text
+# banner instead of issuing a dialog that never paints.
+gui_available() {
+  osascript -e 'tell application "System Events" to return 1' >/dev/null 2>&1
+}
+
+# Drive the TCC grant via a modal dialog. Used in non-TTY (curl|bash)
+# scenarios where install.sh can't read stdin to gate progress on
+# "press Enter when done". Loops up to 3 rounds: open the two GUI
+# windows → display blocking dialog → user clicks 已勾选完毕 → we
+# re-probe --check-trust + bootout/bootstrap. Returns 0 on grant, 1 on
+# cancel or attempts exhausted.
+prompt_tcc_grant_via_dialog() {
+  local bridge="${INSTALL_DIR}/wechat-bridge"
+  local plist="$HOME/Library/LaunchAgents/ai.wechat.bridge.plist"
+  # Common upgrade scenario: the user's Accessibility pane already shows
+  # `wechat-bridge` in the list but preflight still rejects. Cause is
+  # codesign CDHash rotation across releases — the visual entry persists
+  # but the TCC grant for the new binary is missing. Asking the user to
+  # "drag it in" again on top of an existing entry is confusing
+  # ("but it's already there?"). Force-clear the old grant via tccutil so
+  # the dialog instructions ("先把列表里的旧 entry 删了再拖") map onto a
+  # clean state. We use the stable `--identifier` set during codesign
+  # earlier in this script.
+  local had_existing_entry=0
+  if tccutil reset Accessibility ai.wechatskill.wechat-bridge >/dev/null 2>&1; then
+    had_existing_entry=1
+    info "已清理 Accessibility 旧 entry（升级后 CDHash 变化 → 旧授权失效）"
+  fi
+  local upgrade_hint=""
+  if (( had_existing_entry )); then
+    upgrade_hint="
+
+⚠️ 检测到你之前装过：列表里可能还有名为 wechat-bridge 的旧记录但已失效（升级后签名变了）。
+   我已经帮你把旧 entry 清掉了，所以现在列表里看不到也是正常的，请直接拖新的进去。"
+  fi
+  local attempt
+  for attempt in 1 2 3; do
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
+    sleep 1
+    open -R "${bridge}" 2>/dev/null || true
+
+    local title="wechat-bridge 需要辅助功能授权 (${attempt}/3)"
+    local body="把 Finder 里高亮的 wechat-bridge 拖进系统设置「辅助功能」清单，打开右侧开关，然后点【已勾选完毕】。
+
+路径：${bridge}${upgrade_hint}
+
+没勾的话：bridge 启动直接 exit 1，hermes / agent 平台拿不到任何消息。"
+    # Escape for AppleScript string literal
+    local body_safe="${body//\\/\\\\}"; body_safe="${body_safe//\"/\\\"}"
+    local title_safe="${title//\\/\\\\}"; title_safe="${title_safe//\"/\\\"}"
+    local result
+    result=$(osascript \
+      -e "display dialog \"${body_safe}\" with title \"${title_safe}\" buttons {\"取消安装\", \"已勾选完毕\"} default button \"已勾选完毕\" with icon caution" \
+      2>/dev/null) || true
+    if [[ "${result}" != *"已勾选完毕"* ]]; then
+      info "用户取消 TCC 授权（dialog round ${attempt}）"
+      return 1
+    fi
+
+    # Bounce LaunchAgent so the freshly-trusted bridge actually serves.
+    # Ground truth = /health 200, NOT `--check-trust` — see comment on
+    # bridge_log_says_tcc_missing for why --check-trust gives false positives.
+    info "重启 LaunchAgent 让 bridge 继承新 TCC，再 poll /health 验证"
+    launchctl bootout "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
+    sleep 1
+    if [[ -f "${plist}" ]]; then
+      launchctl bootstrap "gui/$(id -u)" "${plist}" 2>/dev/null || true
+    fi
+    if wait_for_bridge_health; then
+      return 0
+    fi
+
+    # Re-attempt; show the user a short hint via a follow-up dialog so
+    # they know what likely went wrong (most common: dragged file but
+    # didn't flip the green toggle).
+    osascript \
+      -e "display dialog \"还没识别到授权。常见坑：拖进去了但右侧开关没开（灰 vs 绿）。再试一次。\" with title \"wechat-bridge 授权检查未通过\" buttons {\"再试一次\"} default button \"再试一次\" with icon caution giving up after 6" \
+      >/dev/null 2>&1 || true
+  done
+  return 1
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   err "macOS only"
   exit 1
@@ -232,87 +382,88 @@ if [[ -f "${LAUNCHAGENT_PLIST}" ]]; then
   launchctl bootout "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
   sleep 1
   launchctl bootstrap "gui/$(id -u)" "${LAUNCHAGENT_PLIST}" 2>/dev/null || true
-  sleep 2
-  # Verify the running bridge is actually launchd-managed (not another
-  # stray manually-launched copy). If launchd's job is "spawn scheduled"
-  # but never reaches "running", port 18400 is probably blocked.
-  RUNNING_PID=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null | head -1)
-  if [[ -n "${RUNNING_PID}" ]]; then
-    success "LaunchAgent 已接管 (pid=${RUNNING_PID})"
+  # Probe /health rather than just `pgrep` for the bin name. A stale
+  # crash-loop can flash a PID briefly between exits; the only signal
+  # that the bridge is actually serving is HTTP 200 from /health.
+  # If that doesn't arrive within 15s we dump the launchctl + stderr
+  # diag inline so the next step (TCC fix) is anchored to the real
+  # failure mode rather than guessing.
+  if wait_for_bridge_health; then
+    RUNNING_PID=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null | head -1)
+    success "LaunchAgent 已接管 + /health 200 OK (pid=${RUNNING_PID:-?})"
   else
-    LD_STATE=$(launchctl print "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null \
-      | grep -E "^\s+state\s*=" | head -1 | awk '{print $3}')
-    warn "LaunchAgent 启动后看不到 wechat-bridge 进程 (state=${LD_STATE:-unknown})"
-    warn "  常见原因：端口 18400 被另一进程占用 / plist 配置错"
-    warn "  排错: lsof -nP -iTCP:18400 | grep LISTEN"
+    dump_bridge_diag "LaunchAgent 启动后 wechat-bridge /health 15s 内无 200 响应"
+    warn "  常见原因：Accessibility TCC 未授权 / 端口 18400 被占 / plist env 配置错"
+    warn "  下面 TCC 检查会进一步确认；如果是端口冲突跑：lsof -nP -iTCP:18400 | grep LISTEN"
   fi
 elif launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
   info "LaunchAgent 注册但 plist 不在标准路径，用 kickstart 重启"
   launchctl kickstart -k "gui/$(id -u)/ai.wechat.bridge" 2>/dev/null || true
+  if ! wait_for_bridge_health; then
+    dump_bridge_diag "LaunchAgent kickstart 后 /health 仍无响应"
+  fi
 fi
 
-# Post-install TCC sanity check. wechat-bridge 1.10.30+ supports
-# --check-trust probe mode: exits 0 if Accessibility granted, 1 if not.
-# Retry a few times with short backoff: right after `codesign --force`
-# and `launchctl kickstart`, macOS TCC cache can briefly report stale
-# state. A false-negative warning right on install would spook the
-# customer unnecessarily.
-TCC_OK=0
-for attempt in 1 2 3; do
-  if "${INSTALL_DIR}/wechat-bridge" --check-trust >/dev/null 2>&1; then
-    TCC_OK=1
-    break
+# TCC / health verification. Ground truth: /health 200 from the
+# launchd-spawned bridge. We do NOT use `wechat-bridge --check-trust`
+# from this script (false positives — see bridge_log_says_tcc_missing).
+#
+# Three states:
+#   bridge_healthy=true  → done, all green
+#   bridge_log_says_tcc_missing → drive the TCC grant flow
+#   neither              → other crash cause (port / plist env / signature)
+if wait_for_bridge_health; then
+  success "Accessibility TCC: 已授权 ✓ (bridge /health 200 OK)"
+  echo ""
+elif bridge_log_says_tcc_missing; then
+  if [[ -t 0 && -t 1 ]]; then
+    # Interactive TTY: drive the full doctor --fix-tcc flow inline.
+    echo ""
+    warn "Accessibility TCC 未授权 —— 直接进交互修复"
+    echo ""
+    exec "${INSTALL_DIR}/wechat" doctor --fix-tcc
+  elif gui_available && prompt_tcc_grant_via_dialog; then
+    success "Accessibility TCC: 已授权 ✓ + bridge /health 200 OK (dialog flow)"
+    echo ""
+  else
+    # Either no GUI (SSH / CI) or user cancelled / 3 attempts exhausted.
+    # Fall back to the static banner.
+    echo ""
+    printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+    printf '%s🛑 STOP — Accessibility 授权没勾，bridge 无法发消息！%s\n' "${C_RED}" "${C_RESET}"
+    printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+    echo ""
+    echo "macOS Sonoma+ 要求 wechat-bridge 在「辅助功能」清单里。没勾的话："
+    echo "  • wechat send 看似成功但消息其实没发出"
+    echo "  • bridge 启动直接 exit 1，hermes / agent 平台拿不到数据"
+    echo ""
+    if gui_available; then
+      echo "已为你打开两个窗口（如果系统未弹出，请手动）："
+      open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
+      sleep 1
+      open -R "${INSTALL_DIR}/wechat-bridge" 2>/dev/null || true
+      echo "  1. System Settings → 隐私与安全 → 辅助功能"
+      echo "  2. Finder 高亮选中 wechat-bridge（拖进上面的清单 + 打开右侧开关）"
+    else
+      echo "（当前 session 无 GUI —— SSH / headless 装机请到目标机器物理屏前操作）"
+      echo "  1. 打开 System Settings → 隐私与安全 → 辅助功能"
+      echo "  2. 把 ${INSTALL_DIR}/wechat-bridge 拖进清单，打开右侧开关"
+    fi
+    echo ""
+    printf '%s勾完后跑这条命令验证 + 重启 bridge：%s\n' "${C_YELLOW}" "${C_RESET}"
+    echo ""
+    printf '   %s%s/wechat doctor --fix-tcc%s\n' "${C_GREEN}" "${INSTALL_DIR}" "${C_RESET}"
+    echo ""
+    printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+    echo ""
   fi
-  sleep 1
-done
-if [[ ${TCC_OK} -eq 1 ]]; then
-  success "Accessibility TCC: 已授权 ✓"
-  echo ""
-elif [[ -t 0 && -t 1 ]]; then
-  # Interactive TTY: drive the full doctor --fix-tcc flow inline. Customer
-  # only has to drag wechat-bridge in the window we open and press Enter.
-  echo ""
-  warn "Accessibility TCC 未授权 —— 直接进交互修复"
-  echo ""
-  exec "${INSTALL_DIR}/wechat" doctor --fix-tcc
 else
-  # Non-interactive (curl | bash): can't read stdin. Fall back to
-  # opening the two GUI windows + a big red banner so the customer
-  # can't miss the step. They re-run `wechat doctor --fix-tcc` after.
-  # TCC missing — auto-trigger the GUI windows so user can't miss the step.
-  # Many customers skim past a single yellow warn line and end up with a
-  # silently broken send path. Open the Accessibility pane + a Finder
-  # window selecting wechat-bridge, RIGHT NOW, before they close the
-  # terminal. Then print a big red banner with the exact 3 actions.
-  echo ""
-  echo ""
-  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
-  printf '%s🛑 STOP — Accessibility 授权没勾，bridge 无法发消息！%s\n' "${C_RED}" "${C_RESET}"
-  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
-  echo ""
-  echo "macOS Sonoma+ 要求 wechat-bridge 在「辅助功能」清单里。没勾的话："
-  echo "  • wechat send 看似成功但消息其实没发出"
-  echo "  • bridge 启动直接 exit 1，hermes / agent 平台拿不到数据"
-  echo ""
-  echo "我现在帮你打开两个窗口（30 秒动作）："
-  echo "  1. System Settings → 隐私与安全 → 辅助功能（要勾的清单）"
-  echo "  2. Finder 高亮选中 wechat-bridge（你拖到清单里的源文件）"
-  echo ""
-  # Best-effort GUI open — these are fire-and-forget; failures don't
-  # block the install (some CI/headless scenarios won't have a GUI).
-  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
-  sleep 1
-  open -R "${INSTALL_DIR}/wechat-bridge" 2>/dev/null || true
-  echo "已打开。请：把 Finder 里的 wechat-bridge 拖到设置窗里 + 打开右侧开关。"
-  echo ""
-  printf '%s拖完后跑一条命令验证 + 重启 bridge：%s\n' "${C_YELLOW}" "${C_RESET}"
-  echo ""
-  printf '   %s%s wechat doctor --fix-tcc%s\n' "${C_GREEN}" "${INSTALL_DIR}" "${C_RESET}"
-  echo ""
-  echo "（这条命令会再次开窗口 + 验证授权 + 重启 LaunchAgent，最多 30 秒。"
-  echo " 如果你已经在前两步窗口里勾完了，跑它只是为了 verify + restart bridge。）"
-  echo ""
-  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+  # /health failed but TCC isn't the cause — most likely port 18400
+  # occupied or plist env wrong. Diag was already dumped right after
+  # bootstrap; just point at the next step.
+  warn "bridge /health 没起来，但日志里没看到 TCC missing 字样"
+  warn "  常见：另一进程占用 18400（lsof -nP -iTCP:18400 | grep LISTEN）/ plist env 配置错"
+  warn "  跑 \`wechat doctor\` 看完整诊断"
   echo ""
 fi
 
