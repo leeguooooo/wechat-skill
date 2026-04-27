@@ -1,6 +1,9 @@
 # wechat-skill
 
-macOS 微信本地命令行：发消息、查聊天记录、收新消息流。给 Claude / Codex / Cursor 等 agent 用尤其顺手。
+**macOS 微信本地化平台** —— CLI / SKILL.md / HTTP bridge / Wechaty Puppet gRPC gateway 一体。
+发消息、查聊天记录、收新消息流，给 Claude / Codex / Cursor 这类 CLI-agent 直接吃 SKILL.md 用；给 Hermes / OpenClaw / n8n / Dify / LangChain 走本地 HTTP + SSE；给任意 [wechaty](https://github.com/wechaty/wechaty) TypeScript / Python / Go 客户端零改动接你本机微信。
+
+> "Skill" 在这里是个品牌词，不是字面"一个 Claude skill"。项目最早从 SKILL.md 切进 AI agent 生态，现在覆盖 6 个 surface（CLI / SKILL.md / HTTP bridge / wechaty gateway / 网页 demo / 激活码 profile API），名字保留是因为 AI 圈对 "skill" 这个入口的认知比"platform / station / hub"高一档。
 
 ---
 
