@@ -1,0 +1,9 @@
+bin/
+*.pyc
+__pycache__/
+.DS_Store
+
+# session-private (must NEVER appear in public repo)
+.omx/
+**/node_modules/
+.preflight.bak
