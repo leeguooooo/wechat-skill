@@ -815,22 +815,22 @@ case ":$PATH:" in
     rc_state=""  # appended | already_covered | unknown
     case "$current_shell_name" in
       bash)
-        ensure_rc_has_path "$HOME/.bashrc" "$INSTALL_DIR"
-        rc_rc=$?
+        rc_rc=0
+        ensure_rc_has_path "$HOME/.bashrc" "$INSTALL_DIR" || rc_rc=$?
         if [[ $rc_rc -eq 0 ]]; then added_file="$HOME/.bashrc"; rc_state="appended"
         elif [[ $rc_rc -eq 2 ]]; then added_file="$HOME/.bashrc"; rc_state="already_covered"
         fi
         ;;
       zsh)
-        ensure_rc_has_path "$HOME/.zshrc" "$INSTALL_DIR"
-        rc_rc=$?
+        rc_rc=0
+        ensure_rc_has_path "$HOME/.zshrc" "$INSTALL_DIR" || rc_rc=$?
         if [[ $rc_rc -eq 0 ]]; then added_file="$HOME/.zshrc"; rc_state="appended"
         elif [[ $rc_rc -eq 2 ]]; then added_file="$HOME/.zshrc"; rc_state="already_covered"
         fi
         ;;
       fish)
-        ensure_fish_has_path "$INSTALL_DIR"
-        rc_rc=$?
+        rc_rc=0
+        ensure_fish_has_path "$INSTALL_DIR" || rc_rc=$?
         if [[ $rc_rc -eq 0 ]]; then added_file="$HOME/.config/fish/config.fish"; rc_state="appended"
         elif [[ $rc_rc -eq 2 ]]; then added_file="$HOME/.config/fish/config.fish"; rc_state="already_covered"
         fi
