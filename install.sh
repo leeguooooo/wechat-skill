@@ -186,6 +186,97 @@ EOF
   return 1
 }
 
+# Probe WeChat's get-task-allow entitlement.
+#
+# Tencent ships WeChat with `get-task-allow=false` (the key isn't in the
+# entitlements plist at all). LLDB — which wechatd uses to install the
+# slot_send hijack BP — can't attach to a process without this. Result:
+# `wechat send` returns `slot_send_bp_failed_to_arm` after a 30s timeout,
+# despite TCC being all green. Real customer dogfood (192.168.0.190
+# 2026-05-18): TCC ✓ + ax_trusted=true ✓, but smoke send failed with
+# cryptic BP arm timeout because we never checked this entitlement here.
+#
+# Echoes one of: true / false / no_app / no_sig
+wechat_get_task_allow_state() {
+  local app_bin="/Applications/WeChat.app/Contents/MacOS/WeChat"
+  if [[ ! -x "${app_bin}" ]]; then
+    echo "no_app"
+    return
+  fi
+  local ents
+  if ! ents=$(codesign -d --entitlements :- "${app_bin}" 2>/dev/null); then
+    echo "no_sig"
+    return
+  fi
+  local v
+  v=$(printf '%s' "${ents}" | plutil -extract com.apple.security.get-task-allow raw -o - - 2>/dev/null || true)
+  if [[ "${v}" == "true" ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+# Print a loud banner + a self-contained merge-mode re-sign recipe when
+# WeChat lacks get-task-allow. Doesn't exit — binaries installed fine,
+# this is a follow-up TCC-level prereq for `wechat send` to actually work.
+#
+# CRITICAL: the recipe MUST merge into Tencent's existing entitlements
+# (application-groups / mach-lookup / sbpl etc.). Replacing the entire
+# entitlements plist with just get-task-allow=true strips Tencent's
+# original keys, causing TCC to pop "access data from other apps" every
+# WeChat launch (private memory: feedback_codesign_must_preserve_entitlements).
+#
+# Returns 0 if OK / can't tell; 1 if confirmed broken.
+warn_if_wechat_lacks_get_task_allow() {
+  local state
+  state="$(wechat_get_task_allow_state)"
+  case "${state}" in
+    true)
+      success "WeChat get-task-allow ✓ —— wechatd 能 attach + 装 hijack BP"
+      return 0
+      ;;
+    no_app)
+      # 后续 doctor 会提示装 WeChat,这里不重复
+      return 0
+      ;;
+    no_sig)
+      warn "WeChat 二进制读不到签名 entitlements (rare),先跑 \`wechat doctor\` 排查"
+      return 1
+      ;;
+    false|*)
+      echo ""
+      printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+      printf '%s🛑 WeChat get-task-allow = false —— send 装不上 hijack BP,必失败%s\n' "${C_RED}" "${C_RESET}"
+      printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+      echo ""
+      echo "Tencent 默认签名里没 get-task-allow,LLDB attach 不上 WeChat,wechatd 装"
+      echo "hijack BP 必然 30s 超时 → \`wechat send\` 永远返回 slot_send_bp_failed_to_arm。"
+      echo ""
+      echo "下面这段【保留原有 Tencent entitlements】(application-groups / mach-lookup"
+      echo "等不会被 strip),只加 get-task-allow=true。复制整段到终端跑:"
+      echo ""
+      printf '%s' "${C_GREEN}"
+      cat <<'CMD'
+  WX_BIN=/Applications/WeChat.app/Contents/MacOS/WeChat
+  WX_ENT=/tmp/wechat-merged-entitlements.plist
+  codesign -d --entitlements :- "$WX_BIN" > "$WX_ENT"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$WX_ENT" \
+    || /usr/libexec/PlistBuddy -c "Set :com.apple.security.get-task-allow true" "$WX_ENT"
+  osascript -e 'quit app "WeChat"' 2>/dev/null; sleep 2
+  sudo codesign --force --sign - --entitlements "$WX_ENT" "$WX_BIN"
+  open -a WeChat
+CMD
+      printf '%s' "${C_RESET}"
+      echo ""
+      echo "完成后跑 \`wechat doctor\` 应看到 wechat_get_task_allow ✓,再发就通。"
+      printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "${C_RED}" "${C_RESET}"
+      echo ""
+      return 1
+      ;;
+  esac
+}
+
 # Optional post-flight smoke send to filehelper. Two reasons:
 #   1. WeChat's Qt slot_send signal chain only wires after a real
 #      user-initiated send; right after a bridge bootout/bootstrap the
@@ -213,6 +304,13 @@ maybe_smoke_send() {
   # WeChat running? Without it the daemon can't attach to the dylib.
   if ! pgrep -x WeChat >/dev/null 2>&1; then
     info "filehelper smoke send 已跳过（WeChat 未运行；启动 WeChat 后跑：wechat send 'hi' filehelper）"
+    return 0
+  fi
+  # WeChat get-task-allow? wechatd 用 LLDB attach,没这个 entitlement
+  # 装 hijack BP 必然 30s 超时,smoke 跑了也是浪费 30s + 误报 InputView
+  # 信号链问题。提前 skip,banner 已经在前面打过了。
+  if [[ "$(wechat_get_task_allow_state)" != "true" ]]; then
+    info "filehelper smoke send 已跳过（WeChat get-task-allow=false,先跑上面那段重签命令）"
     return 0
   fi
   info "跑 filehelper smoke send：wire WeChat slot_send signal chain + 端到端验证"
@@ -533,20 +631,52 @@ for pat in \
 done
 sleep 1
 
-# Bootstrap 回来。Bridge 必须能起到 /health 200;其它 LaunchAgent
-# (orchestrate 之类) 没有 /health,bootstrap 失败也只 warn,doctor 会
-# 后续兜底报告。
+# Bootstrap 回来。
+#
+# 顺序关键!!! ai.wechat.bridge 必须**先**起,因为 ai.wechat.orchestrate
+# RunAtLoad=true,bootstrap 后立刻派生 `wechat orchestrate run`,而该进程
+# 自己会 spawn wechatd 子进程。如果 orchestrate 抢在 bridge lazy-start
+# wechatd 之前,新 wechatd 的 launchd responsibility chain 就是
+# orchestrate → wechat CLI → install.sh 这条 stale path,AXIsProcessTrusted
+# 永远 false,install.sh 卡死在 wait Accessibility 循环。
+#
+# 修复:bridge 先 bootstrap + curl /health 强制 lazy-start wechatd(chain
+# 干净:wechatd 父 = bridge,bridge 父 = launchd),wechatd 站稳之后再
+# bootstrap 其它 plist。其它 LaunchAgent 起来时发现 wechatd socket
+# `/tmp/wechatd-${UID}.sock` 已被 bridge 派生的 wechatd 占用,二次 spawn
+# 必失败自杀 → 不污染 chain。
+#
+# 192.168.0.190 实测:不分顺序时 orchestrate 抢先 → wechatd chain 污染;
+# 分顺序后 bridge 抢先 → wechatd ax_trusted=true 一遍过。
+BRIDGE_PLIST_PATH="${LAUNCHAGENT_DIR}/ai.wechat.bridge.plist"
+if [[ -f "${BRIDGE_PLIST_PATH}" ]]; then
+  info "先 bootstrap ai.wechat.bridge 抢 wechatd spawn 权 (避免其它 LaunchAgent 派生污染 chain)"
+  launchctl bootstrap "gui/$(id -u)" "${BRIDGE_PLIST_PATH}" 2>/dev/null || true
+  # Strong-trigger lazy-start: bridge 起来后 curl /health 让它 fork
+  # wechatd。给 2s 让 wechatd 真正落地接管 sock,之后其它 plist 派生
+  # 的 wechatd 才会发现 sock 被占而自杀。
+  curl -fsS -m 3 http://127.0.0.1:18400/health >/dev/null 2>&1 || true
+  sleep 2
+fi
+
 if (( ${#WECHAT_AGENT_PLISTS[@]} > 0 )); then
-  info "重新加载 ${#WECHAT_AGENT_PLISTS[@]} 个 wechat LaunchAgent（bootstrap，干净 chain）"
+  # 然后 bootstrap 剩下的(orchestrate 等)。如果只有 bridge 一个 plist,
+  # 这个循环啥也不做。
+  REMAINING=0
   for plist in "${WECHAT_AGENT_PLISTS[@]}"; do
     agent="$(basename "${plist}" .plist)"
+    [[ "${agent}" == "ai.wechat.bridge" ]] && continue
+    REMAINING=$((REMAINING + 1))
     if ! launchctl bootstrap "gui/$(id -u)" "${plist}" 2>/dev/null; then
       warn "  bootstrap ${agent} 失败 — 这个 LaunchAgent 可能已经损坏,跑 \`launchctl print gui/$(id -u)/${agent}\` 看详情"
     fi
   done
+  if (( REMAINING > 0 )); then
+    info "bootstrap 完剩余 ${REMAINING} 个 LaunchAgent (bridge 已先起,wechatd 由 bridge 派生)"
+  fi
 
-  # 只对 bridge 做 /health 等待。
-  if [[ -f "${LAUNCHAGENT_DIR}/ai.wechat.bridge.plist" ]]; then
+  # Bridge /health 复验 (上面 curl 已经试过一次,这里如果还没成是真问题)。
+  if [[ -f "${BRIDGE_PLIST_PATH}" ]]; then
     if wait_for_bridge_health; then
       RUNNING_PID=$(pgrep -f "${INSTALL_DIR}/wechat-bridge" 2>/dev/null | head -1)
       success "LaunchAgent 已接管 + /health 200 OK (pid=${RUNNING_PID:-?})"
@@ -563,14 +693,6 @@ elif launchctl list 2>/dev/null | grep -q ai.wechat.bridge; then
     dump_bridge_diag "LaunchAgent kickstart 后 /health 仍无响应"
   fi
 fi
-
-# Lazy-trigger wechatd via bridge /health (clean responsibility chain:
-# bridge spawns wechatd as child, NOT install.sh / current shell). 这步
-# 关键 —— 让 wechatd 的 responsible process 是 bridge (LaunchAgent
-# spawned),而不是 install.sh 这条 SSH/Terminal chain。否则即使 bootout
-# 了 orchestrate,如果 doctor / send 是从 install.sh 调起来触发 wechatd
-# 派生的,新 wechatd 又会继承 install.sh 的 chain。
-curl -fsS -m 2 http://127.0.0.1:18400/health >/dev/null 2>&1 || true
 
 # Drive the TCC remediation flow. Three branches:
 #   - interactive TTY → exec doctor --fix-tcc inline
@@ -593,6 +715,7 @@ remediate_tcc_grant() {
     exec "${INSTALL_DIR}/wechat" doctor --fix-tcc
   elif gui_available && prompt_tcc_grant_via_dialog; then
     success "Accessibility TCC: 已授权 ✓ (dialog flow)"
+    warn_if_wechat_lacks_get_task_allow || true
     maybe_smoke_send
     echo ""
   else
@@ -680,6 +803,7 @@ wechatd_ax_trusted() {
 if wait_for_bridge_health_retry; then
   if wechatd_ax_trusted; then
     success "Accessibility TCC: 已授权 ✓ (bridge /health 200 OK + wechatd ax_trusted)"
+    warn_if_wechat_lacks_get_task_allow || true
     maybe_smoke_send
     echo ""
   else
