@@ -273,6 +273,26 @@ This is intrinsic to WeChat's Qt event loop; no automation can substitute. If `w
 
 ---
 
+## Send failure modes (agent self-recovery table)
+
+When `wechat send` returns `{ok: false, …}` or stderr matches the `reason:` slot in the support payload, agents should map the reason to the playbook below **before** asking the user to debug. The first three are recoverable inline; the rest need a human action that the agent should ask for explicitly.
+
+| `reason:` slot | Root cause | Agent action |
+|---|---|---|
+| `delivery_verify_timeout` / `slot_send_bp_armed_no_fire` | WeChat (re)launched but Qt slot_send signal chain not yet wired | Tell user: open WeChat → click 「文件传输助手」→ type any message → press Enter. Then retry `wechat send`. (See Step 4 above.) |
+| `wechat_not_running` | WeChat.app not launched | Run `open -a WeChat`. If from a non-aqua SSH session, fall back to `osascript -e 'tell application "WeChat" to activate'`. Wait ~5s before retrying. |
+| `slot_send_bp_failed_to_arm` (detail: `hijack BP install did not complete within 30s`) | WeChat has `get-task-allow=false` (Tencent default signing); wechatd's LLDB can't attach | Run `wechat doctor` to confirm `wechat_get_task_allow ✗`. Then ask the user to copy-run the **merge-mode re-sign block** that `install.sh` prints (or `wechat doctor` suggests). Needs sudo, must be run by the user. Do NOT use a replace-mode `codesign --entitlements ...` command — it strips Tencent's `application-groups` and breaks TCC for WeChat itself. |
+| `daemon_accessibility FAIL` / `ax_trusted=false` after a recent install/upgrade | Multiple `ai.wechat.*` LaunchAgents on the machine — orchestrate (KeepAlive) re-spawned wechatd with a stale launchd responsibility chain | Re-run `curl -fsSL https://raw.githubusercontent.com/leeguooooo/wechat-skill/main/install.sh \| bash`. v1.16.12+ install.sh bootouts every `ai.wechat.*.plist` and bootstraps in the right order. Don't try to surgically `launchctl kickstart` — it doesn't reset the responsibility chain. |
+| `tcc_accessibility_denied` (wechat-bridge or wechatd untrusted) | User hasn't dragged binaries into System Settings → Privacy & Security → 辅助功能, or dragged them but didn't toggle ON | Open the pane: `open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"` + `open ~/.local/bin`. Tell user to drag both `wechatd` and `wechat-bridge` in **and** toggle both to ON. macOS strictly requires user-initiated drag — no automation can substitute. |
+| `subscription_*` / `unauthorized` | Activation code expired / not redeemed | `wechat auth status` to confirm. Then `wechat auth activate <code>`. Direct user to https://t.me/WechatCliBot for a code. |
+| `dylib_fingerprint_unverified` | WeChat auto-updated to a build not in our verified set | `wechat doctor` shows the new SHA. Tell user to turn off WeChat auto-update (WeChat → 设置 → 通用 → 「有更新时自动升级」) and reinstall from https://mac.weixin.qq.com/en. New build support is a maintainer task — file an issue with the SHA. |
+
+**Key principle**: every `reason:` slot is stable enum; the support payload includes `ax_trusted`, `input_monitoring`, `dylib_sha256`, `cli_version`, `daemon_version` — match on those exact field names, not on the human-readable Chinese error message (it may evolve across releases).
+
+**LaunchAgent / TCC handbook for agents**: if you ever need to manually reset responsibility chains (e.g. user's machine has a customized LaunchAgent layout), use `launchctl bootout` + `launchctl bootstrap` — never `launchctl kickstart -k`. `kickstart` doesn't re-read plist `EnvironmentVariables` and doesn't reset launchd's responsibility-chain cache. The `install.sh` upgrade flow is the reference implementation.
+
+---
+
 ## Usage — send
 
 ```bash
