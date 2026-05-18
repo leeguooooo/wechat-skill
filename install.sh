@@ -13,7 +13,7 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 # wx/src/config.rs. Surfaced at install time so the user immediately knows
 # whether their WeChat is in our calibrated set.
 SUPPORTED_WECHAT_VERSIONS="4.0.1.52, 4.1.8, 4.1.9"
-SUPPORTED_WECHAT_BUILDS="36830, 37335, 37342, 268575"
+SUPPORTED_WECHAT_BUILDS="36830, 37335, 37342, 268575, 268595, 268596"
 WECHAT_DOWNLOAD_URL="https://mac.weixin.qq.com/en"
 
 # ANSI color helpers — only emit if stderr/stdout is a tty so logs piped to
